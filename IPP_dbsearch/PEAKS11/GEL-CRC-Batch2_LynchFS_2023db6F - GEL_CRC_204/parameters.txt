@@ -1,0 +1,47 @@
+Project:
+* Name: GEL-CRC-Batch2_LynchFS
+* Description: 
+* Created at: 2024-06-21 11:32:49
++ GEL-CRC-Batch2_LynchFS_2023db6F - GEL_CRC_204
+  Description: 
+  Created at: 2024-06-24 09:37:26
+
+  Data Refinement Parameters:
+    Skip Preprocessing: false
+    Mass Correction: true
+    Chimera Association: true
+
+  Deep Novo Parameters:
+    Precursor Mass Error Tolerance: 5.00ppm
+    Fragment Mass Error Tolerance: 0.03Da
+    Enzyme: None
+    Max Variable PTM per Peptide: 2
+    Fixed Modifications: 
+    - Acetylation (N-term) (+42.01)
+    - Cysteinylation (+119.00)
+    - Deamidation (NQ) (+0.98)
+    - Oxidation (M) (+15.99)
+    Variable Modifications: 
+
+  Peptide Search Parameters:
+    Precursor Mass Error Tolerance: 5.00ppm
+    Fragment Mass Error Tolerance: 0.03Da
+    Enzyme: None
+    Peptide Length Range: 6 - 45
+    Max Variable PTM per Peptide: 2
+    Fixed Modifications: 
+    - Acetylation (N-term) (+42.01)
+    - Cysteinylation (+119.00)
+    - Deamidation (NQ) (+0.98)
+    - Oxidation (M) (+15.99)
+    Variable Modifications: 
+    Database: 
+    - QY_20230526_sprot20230526_CRCframeshift.fasta
+      - Taxonomy: all species
+      - Searched Entries: 20845
+    Report Filter: 
+      Peptide FDR: 1.0%
+      Deep Novo Score >= 70.00%
+      Deep Novo Protein Association Tag Sharing: 5
+      Confident Amino Acid Threshold: 2.00%
+

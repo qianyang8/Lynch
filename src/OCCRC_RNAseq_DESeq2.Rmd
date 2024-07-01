@@ -1,0 +1,634 @@
+---
+title: "OCCRC_RNAseq_DESeq2"
+output: html_document
+date: "2023-08-09"
+---
+
+```{r setup, include=FALSE}
+#knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r message=FALSE, warning=FALSE}
+# set library path
+.libPaths(c("~/Documents/Rlib", .libPaths()))
+```
+
+```{r load packages, message=FALSE, warning=FALSE}
+library(SummarizedExperiment)
+library(DESeq2)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(stringr)
+library(stats)
+library(pheatmap)
+library("PoiClaClu")
+library("glmpca")
+library("ggbeeswarm")
+library(EnhancedVolcano)
+library(RColorBrewer)
+library(org.Hs.eg.db)
+library(EnsDb.Hsapiens.v86)
+```
+
+## 1. Load and update rds file
+
+```{r}
+se <- readRDS('../data/processed_AB_20230627/salmon.merged.gene_counts.rds')
+```
+
+```{r}
+hypermutated = c(6310, 6413, 6346, 6976, 8210, 8347, 8637)
+non_hypermutated = as.factor(c(6411, 6344, 6794, 4732, 6894))
+tbc_hypermutated = as.factor(c(946, 7713, 7984))
+
+ca_history = as.factor(c(6413, 6346, 6976, 8347, 6344, 6794, 6894))
+```
+
+```{r update samples info}
+colinfo <- data.frame(colData(se))
+colinfo <- colinfo %>% 
+  mutate(tissue = case_when(
+    endsWith(names, "Nor") ~ "Norm",
+    endsWith(names, "Norm") ~ "Norm",
+    endsWith(names, "Pol") ~ "Poly",
+    endsWith(names, "Poly") ~ "Poly")) %>%
+  mutate(donor = str_split_fixed(names, fixed("_"), 3)[,2]) %>%
+  mutate(hypermutated = case_when(
+    donor %in% non_hypermutated ~ "No",
+    donor %in% tbc_hypermutated ~ "TBC",
+    .default = "Yes")) %>%
+  mutate(ca_history = case_when(
+    donor %in% ca_history ~ "Yes",
+    .default = "NA")
+    )
+```
+
+```{r}
+# save condistions as factors
+tissue <- as.factor(se$tissue)
+donor <- as.factor(se$donor)
+```
+
+```{r}
+se$tissue <-colinfo$tissue # add tissue info
+se$donor <- colinfo$donor #add patients info
+se$ca_history <- colinfo$ca_history
+se$hypermutated <- colinfo$hypermutated
+head(colData(se))
+```
+
+```{r}
+sprintf("This RNAseq dataset detected %d genes from %d samples of %d donors", 
+        dim(se)[1],
+        dim(se)[2],
+        nlevels(donor))
+```
+
+As per advice from Andy and the [tutorial here](http://master.bioconductor.org/packages/release/workflows/vignettes/rnaseqGene/inst/doc/rnaseqGene.html), it is recommended to just round the fragment counts generated from Salmon
+
+```{r}
+assay(se, "round_counts") <- round(assay(se,'counts'))
+assay(se, "round_counts")[1:5,1:5]
+```
+
+```{r message=FALSE, warning=FALSE}
+# save as DESeqDataSet object
+dds.raw <- DESeqDataSetFromMatrix(countData = assay(se, 'round_counts'),
+                              colData = colData(se),
+                              design = ~ tissue + hypermutated)
+```
+
+## 2. Data pre-processing
+
+### 2.1 Filter out low expressed genes
+
+```{r}
+# act conservatively - only filter out genes with less than 2 count across all samples
+keep <- rowSums(counts(dds.raw)) > 3
+dds <- dds.raw[keep,]
+nrow(dds)
+```
+
+```{r}
+par(mfrow=c(2,1), mar=c(4,4,2,2))
+
+plot(table(rowSums(counts(dds.raw)==0)),
+     ylab = "Number of genes",
+     main="A. Raw data")
+
+plot(table(rowSums(counts(dds)==0)), 
+     xlab = "Number of samples with unexpressed genes across all samples",
+     ylab = "Number of genes",
+     main="B. Filtered data")
+```
+
+### 2.2 Log transformation
+
+```{r}
+rld <- rlog(dds, blind = T) # so that the difference between different tissue does not contrubute to the expected variance-mean trend
+```
+
+```{r}
+assay(rld)[1:5, 1:5]
+```
+
+```{r}
+# also try the vsd method
+vsd <- vst(dds, blind=F)
+assay(vsd)[1:5,1:5]
+```
+
+Now plot and get a more straighforward overview of the effect of the transformation.
+
+```{r}
+dds <- estimateSizeFactors(dds)
+
+df <- bind_rows(
+  as_tibble(log2(counts(dds, normalized=T)[,1:2]+1)) %>%
+    mutate(transformation = "log2(x+1)"),
+  as_tibble(assay(vsd)[,1:2]) %>% mutate(transformation = "vst"),
+  as_tibble(assay(rld)[,1:2]) %>% mutate(transformation = "rlog")
+)
+
+colnames(df)[1:2] <- c("x", "y")
+lvls <- c("log2(x+1)", "vst", "rlog")
+df$transformation <- factor(df$transformation, levels=lvls)
+
+```
+
+```{r}
+ggplot(df, aes(x=x,y=y)) + geom_hex(bins = 80) + coord_fixed() + facet_grid( . ~ transformation)
+```
+
+### 2.3 Measure sample difference
+
+This is to check which samples are similar to each other
+
+```{r}
+sampleDists <- dist(t(assay(rld)))
+```
+
+```{r}
+sampleDistMatrix <- as.matrix(sampleDists)
+rownames(sampleDistMatrix) <- paste( rld$donor, rld$tissue, sep='-')
+colnames(sampleDistMatrix) <- NULL
+colors <- colorRampPalette( rev(brewer.pal(9, "Blues")))(255)
+pheatmap(sampleDistMatrix,
+         clustering_distance_rows = sampleDists,
+         clustering_distance_cols = sampleDists,
+         col=colors, 
+         main="Heatmap of sample-to-sample distance with CPM")
+```
+
+```{r}
+sampleDists2 <- dist(t(assay(vsd)))
+```
+
+```{r}
+sampleDistMatrix2 <- as.matrix(sampleDists2)
+rownames(sampleDistMatrix2) <- paste( vsd$donor, vsd$tissue, sep='-')
+colnames(sampleDistMatrix2) <- NULL
+colors <- colorRampPalette( rev(brewer.pal(9, "Blues")))(255)
+pheatmap(sampleDistMatrix2,
+         clustering_distance_rows = sampleDists2,
+         clustering_distance_cols = sampleDists2,
+         col=colors, 
+         main="Heatmap of sample-to-sample distance with VST")
+```
+
+```{r}
+# otherwise use PoiClaClu, but it takes raw (not normalized) counts
+poisd <- PoissonDistance(t(counts(dds)))
+```
+
+```{r}
+samplePoisDistMatrix <- as.matrix(poisd$dd)
+rownames(samplePoisDistMatrix) <- paste( dds$donor, dds$tissue, sep=" - " )
+colnames(samplePoisDistMatrix) <- NULL
+pheatmap(samplePoisDistMatrix,
+         clustering_distance_rows = poisd$dd,
+         clustering_distance_cols = poisd$dd,
+         col = colors)
+```
+
+## 3. Dimension Reduction
+
+### 3.1 PCA
+
+```{r}
+par(mfrow=c(2,1))
+plotPCA(rld, intgroup = "tissue", ntop=5000)
+plotPCA(vsd, intgroup = "tissue", ntop=5000) # vsd seems to be a better choice
+# so the top 2 PC only explains 35% total variance
+```
+
+or use generalized PCA - they use raw counts
+
+```{r}
+gpca <- glmpca(counts(dds), L=5)
+gpca.dat <- gpca$factors
+gpca.dat$tissue <- dds$tissue
+gpca.dat$donor <- dds$donor
+```
+
+```{r}
+ggplot(gpca.dat,
+       aes(x = dim1, y = dim2, color= tissue)) + 
+  geom_point(size=3) + coord_fixed() + ggtitle("glmpca - Generalized PCA")
+```
+
+### 3.2 Multidimensional scaling (MDS) plot
+
+We can use this when we do not have raw count matrix, but only a matrix of distances
+
+we can use the vsd transformed data for MDS
+
+```{r}
+mds <- as.data.frame(colData(vsd)) %>%
+  cbind(cmdscale(sampleDistMatrix2))
+ggplot(mds, aes(x = `1`, y = `2`, color = tissue)) + 
+  geom_point(size = 3) + coord_fixed() + ggtitle("MDS with VST data") + theme(legend.position = 'right')
+```
+
+or use the Poisson distance data
+
+```{r}
+mdsPois <- as.data.frame(colData(dds)) %>%
+   cbind(cmdscale(samplePoisDistMatrix))
+```
+
+```{r}
+ggplot(mdsPois, aes(x = `1`, y = `2`, color = tissue)) +
+  geom_point(size = 3) + coord_fixed() + ggtitle("MDS with PoissonDistances")
+```
+
+```{r}
+# plot MDS by hypermutation status
+ggplot(mds, aes(x = `1`, y = `2`, color=tissue, shape = hypermutated)) + 
+     geom_point(size = 3) + 
+     scale_fill_discrete(breaks=c('Yes', 'No', 'TBC')) +
+     scale_shape_manual(values = c(4, 1, 19)) +
+     coord_fixed() + 
+     ggtitle("MDS with VST data") + 
+     theme(legend.position = 'bottom')
+```
+
+## 4. DE analysis
+
+```{r}
+# run the DE analysis with a single call
+dds <- DESeq(dds)
+```
+
+```{r}
+# save the results df 
+res <- results(dds)
+head(res)
+```
+
+```{r}
+# it carried the metadata with info in the columns
+mcols(res)  
+```
+
+```{r}
+summary(res)
+```
+
+```{r}
+o <- order(res$log2FoldChange)
+res[o,]
+```
+
+## 5. Plotting results
+
+### 5.1 Counts plot
+
+```{r}
+topGene <- rownames(res)[which.min(res$padj)]
+plotCounts(dds, gene = "ENSG00000121989", intgroup=c("tissue"))
+# cannot use this to plot "donor" as it was not in the original condition
+```
+```{r plot FS genes}
+# shortlist genes
+FS_genes <- c("ENSG00000121989", "ENSG00000163513", "ENSG00000138674", "ENSG00000108375", "ENSG00000116251")
+FS_names <-  c("ACVR2A", "TGFBR2", "SEC31A", "RNF43", "RPL22")
+
+# transform
+FS_gene_norm <- data.frame(assay(vsd)[FS_genes,]) %>% tibble::rownames_to_column() %>% as_tibble()
+# update the names
+FS_gene_norm$rowname <- FS_names
+gather_FS_genes <- FS_gene_norm %>% 
+  gather(colnames(FS_gene_norm)[2:43], key="sample", value="vst_counts")
+
+# update data info
+gather_FS_genes <- gather_FS_genes %>% mutate(tissue = case_when(
+     endsWith(sample, "Nor") ~ "Normal",
+     endsWith(sample, "Norm") ~ "Normal",
+     endsWith(sample, "Pol") ~ "Polyps",
+     endsWith(sample, "Poly") ~ "Polyps")) %>% 
+  mutate(donor = str_split_fixed(sample, fixed("_"), 3)[,2]) %>%
+  mutate("hypermutated" = case_when(
+  donor %in% hypermutated ~ "Yes",
+  donor %in% non_hypermutated ~ "No",
+  donor %in% tbc_hypermutated ~ "TBC"))
+```
+
+```{r}
+ggplot(gather_FS_genes, aes(x=rowname, y = vst_counts, fill = tissue)) + 
+  geom_boxplot() +
+  geom_dotplot(binaxis='y', stackdir='center', dotsize = 0.5, position=position_dodge(0.75), alpha = 0.5) +
+  scale_y_log10() +
+  xlab("Genes") +
+  ylab("Log10 Normalized Counts") 
+```
+```{r}
+ggplot(gather_FS_genes, aes(x=tissue, y = vst_counts, fill = tissue)) + 
+  geom_boxplot(aes(fill = tissue)) +
+  geom_line(aes(group = donor), linewidth = .2) +
+  geom_point(size = 1) +
+  facet_wrap(~ rowname, nrow = 1) +
+  scale_y_log10() +
+  xlab("Genes with recurrent frame shift mutation in Lynch Syndrome") +
+  ylab("Log10 Normalized Counts") 
+```
+```{r}
+ggplot(gather_FS_genes, aes(x=hypermutated, y = vst_counts, fill = hypermutated)) + 
+  geom_boxplot(aes(fill = hypermutated)) +
+  #geom_line(aes(group = donor), linewidth = .2) +
+  geom_point(size = 1) +
+  facet_wrap(~ rowname, nrow = 1) +
+  scale_y_log10() +
+  xlab("Genes with recurrent frame shift mutation in Lynch Syndrome") +
+  ylab("Log10 Normalized Counts") 
+```
+```{r vaxx genes}
+# shortlist genes
+vax_genes <- c("ENSG00000121989", "ENSG00000036054", "ENSG00000083642")
+vax_names <-  c("ACVR2A", "TBC1D23", "PDS5B")
+
+# transform
+vax_gene_norm <- data.frame(assay(vsd)[vax_genes,]) %>% tibble::rownames_to_column() %>% as_tibble()
+# update the names
+vax_gene_norm$rowname <- vax_names
+gather_vax_genes <- vax_gene_norm %>% 
+  gather(colnames(vax_gene_norm)[2:43], key="sample", value="vst_counts")
+
+# update data info
+gather_vax_genes <- gather_vax_genes %>% mutate(tissue = case_when(
+     endsWith(sample, "Nor") ~ "Normal",
+     endsWith(sample, "Norm") ~ "Normal",
+     endsWith(sample, "Pol") ~ "Polyps",
+     endsWith(sample, "Poly") ~ "Polyps")) %>% 
+  mutate(donor = str_split_fixed(sample, fixed("_"), 3)[,2]) %>%
+  mutate("hypermutated" = case_when(
+  donor %in% hypermutated ~ "Yes",
+  donor %in% non_hypermutated ~ "No",
+  donor %in% tbc_hypermutated ~ "TBC"))
+```
+
+```{r}
+ggplot(gather_vax_genes, aes(x=tissue, y = vst_counts, fill = tissue)) + 
+  geom_boxplot(aes(fill = tissue)) +
+  geom_line(aes(group = donor), linewidth = .2) +
+  geom_point(size = 1) +
+  facet_wrap(~ rowname, nrow = 1) +
+  scale_y_log10() +
+  xlab("Source genes for shortlisted immunopeptides in CRC") +
+  ylab("Log10 Normalized Counts") 
+```
+```{r}
+# MHC molecules
+# shortlist genes
+hla_genes <- c("ENSG00000206503", "ENSG00000234745", "ENSG00000204525")
+hla_names <-  c("HLAA", "HLAB", "HLAC")
+
+# transform
+hla_gene_norm <- data.frame(assay(vsd)[hla_genes,]) %>% tibble::rownames_to_column() %>% as_tibble()
+# update the names
+hla_gene_norm$rowname <- hla_names
+gather_hla_genes <- hla_gene_norm %>% 
+  gather(colnames(hla_gene_norm)[2:43], key="sample", value="vst_counts")
+
+# update data info
+gather_hla_genes <- gather_hla_genes %>% mutate(tissue = case_when(
+     endsWith(sample, "Nor") ~ "Normal",
+     endsWith(sample, "Norm") ~ "Normal",
+     endsWith(sample, "Pol") ~ "Polyps",
+     endsWith(sample, "Poly") ~ "Polyps")) %>% 
+  mutate(donor = str_split_fixed(sample, fixed("_"), 3)[,2]) %>%
+  mutate("hypermutated" = case_when(
+  donor %in% hypermutated ~ "Yes",
+  donor %in% non_hypermutated ~ "No",
+  donor %in% tbc_hypermutated ~ "TBC"))
+```
+
+```{r}
+ggplot(gather_hla_genes, aes(x=tissue, y = vst_counts, fill = tissue)) + 
+  geom_boxplot(aes(fill = tissue)) +
+  geom_line(aes(group = donor), linewidth = .2) +
+  geom_point(size = 1) +
+  facet_wrap(~ rowname, nrow = 1) +
+  scale_y_log10() +
+  xlab("Source genes for shortlisted immunopeptides in CRC") +
+  ylab("Log10 Normalized Counts") 
+```
+
+
+```{r}
+# or can do this plot manually
+geneCounts <- plotCounts(dds, gene = topGene, intgroup = c("hypermutated","tissue","donor"), ,
+                         returnData = TRUE)
+```
+
+```{r}
+ggplot(geneCounts) +
+  geom_point(aes(x = tissue, y = count, color = hypermutated, group = hypermutated)) +
+  scale_y_log10()
+```
+
+```{r}
+ggplot(geneCounts, 
+       aes(x = tissue, y = count,color = hypermutated)) + 
+  scale_y_log10() + 
+  geom_violin(trim=F, position = "dodge") + 
+  geom_jitter(height = 0, width = 0.2)
+```
+
+```{r}
+ggplot(geneCounts,
+       aes(x = tissue, y = count, group=tissue, color = factor(donor))) + 
+  scale_y_log10() + 
+  geom_violin(trim=F) + 
+  geom_beeswarm(cex = 3)
+```
+
+plot top 20 genes
+```{r message=FALSE, warning=FALSE}
+res_df <- data.frame(res)
+sig_res <- dplyr::filter(res_df, padj < 0.01 & abs(log2FoldChange) > 1)
+top20_sig_genes <- sig_res %>% arrange(padj) %>% head(20) %>% rownames()
+top20_sig_norm <- data.frame(assay(vsd)[top20_sig_genes,]) %>% tibble::rownames_to_column(var = "ENSG") %>% as_tibble()
+
+gather_top20_sig <- top20_sig_norm %>% gather(colnames(top20_sig_norm)[2:43], key="sample", value="vst_counts")
+
+gather_top20_sig <- gather_top20_sig %>% mutate(tissue = case_when(
+     endsWith(sample, "Nor") ~ "Norm",
+     endsWith(sample, "Norm") ~ "Norm",
+     endsWith(sample, "Pol") ~ "Poly",
+     endsWith(sample, "Poly") ~ "Poly")) %>% 
+  mutate(donor = str_split_fixed(sample, fixed("_"), 3)[,2]) %>%
+  mutate("hypermutated" = case_when(
+  donor %in% hypermutated ~ "Yes",
+  donor %in% non_hypermutated ~ "No",
+  donor %in% tbc_hypermutated ~ "TBC")) %>%
+  mutate(SYMBOL = mapIds(org.Hs.eg.db, keys=ENSG, column="SYMBOL", keytype="ENSEMBL", multiVals="first"))
+
+```
+
+```{r}
+ggplot(gather_top20_sig) + 
+  geom_point(aes(x=SYMBOL, y = vst_counts, color = tissue)) +
+  scale_y_log10() +
+  xlab("Genes") +
+  ylab("Log10 Normalized Counts") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+```{r}
+ggplot(gather_top20_sig, aes( group = hypermutated)) + 
+  geom_point(aes(x=SYMBOL, y = vst_counts, color = hypermutated, alpha=1)) +
+  scale_y_log10() +
+  xlab("Top 20 significantly expressed genes") +
+  ylab("Log10 Normalized Counts") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1), legend.position = "top")
+```
+
+```{r}
+# check out KLKs
+KLK <- mapIds(org.Hs.eg.db,
+               keys=c("KLK6", "KLK7", "KLK8", "KLK10"),
+               column="ENSEMBL",
+               keytype="SYMBOL",
+               multiVals="first")
+par(mfrow=c(2,2))
+```
+
+```{r}
+ggplot(subset(gather_top20_sig, SYMBOL %in% "KLK10"), 
+       aes(x=factor(hypermutated, 
+                    level=c("Yes", "No", "TBC")), 
+           vst_counts, 
+           colour=tissue)) +
+  scale_y_log10() +
+  #geom_violin(trim=F) +
+  geom_beeswarm(cex=3) +
+  xlab("Hypermutation") +
+  ylab("normalized counts") +
+  ggtitle("KLK10 expression")
+```
+
+```{r}
+ggplot(subset(gather_top20_sig, SYMBOL %in% FS_genes), 
+       aes(x=tissue, 
+           vst_counts, 
+           colour=hypermutated)) +
+  scale_y_log10() +
+  #geom_violin(trim=F) +
+  geom_beeswarm(cex=3) +
+  xlab("Hypermutation") +
+  ylab("normalized counts") +
+  ggtitle("KLK10 expression")
+```
+
+```{r}
+ggplot(subset(gather_top20_sig, SYMBOL %in% "KLK10"), aes(x=factor(hypermutated, level=c("Yes", "No", "TBC")), vst_counts, colour=tissue)) +
+  geom_point() +
+  scale_y_log10() +
+  geom_violin(trim=F) +
+  xlab("Hypermutation") 
+```
+
+### 5.2 MA-plot
+
+y asix - "M" stands for "minus", subtraction of log values is equicalent to the log of the ratio
+
+x axis - "A" stands for "average"
+
+```{r}
+resultsNames(dds)
+```
+
+```{r}
+res <- lfcShrink(dds, coef="tissue_Poly_vs_Norm", type="apeglm")
+plotMA(res, ylim=c(-5,5))
+```
+
+```{r}
+hist(res$pvalue[res$baseMean > 1], breaks = 0:20/20,
+     col = "grey50", border = "white")
+```
+
+## 6. Update annotation information
+
+```{r add gene symbol information, message=FALSE, warning=FALSE}
+library(EnsDb.Hsapiens.v86)
+edb <- EnsDb.Hsapiens.v86
+columns(edb)
+```
+
+```{r message=FALSE, warning=FALSE}
+dds_anno <- select(org.Hs.eg.db, keys=rownames(dds), columns=c("ENTREZID", "SYMBOL"), keytype = "ENSEMBL")
+```
+
+or do this mannually with Ensemble
+```{r}
+res$symbol <- mapIds(org.Hs.eg.db,
+                     keys=rownames(res),
+                     column="SYMBOL",
+                     keytype="ENSEMBL",
+                     multiVals="first")
+
+res$entrez <- mapIds(org.Hs.eg.db,
+                     keys=rownames(res),
+                     column="ENTREZID",
+                     keytype="ENSEMBL",
+                     multiVals="first")
+```
+
+```{r}
+resOrder <- res[order(res$pvalue), ]
+```
+
+### 5.3 Volcano plot
+
+```{r}
+EnhancedVolcano(res, 
+                lab = res$symbol, 
+                x = "log2FoldChange", 
+                y = "pvalue", 
+                FCcutoff = 2, 
+                pointSize = 2, 
+                legendPosition = "top", 
+                drawConnectors = T, 
+                widthConnectors = 0.5, 
+                legendIconSize = 4, 
+                legendLabSize = 12, 
+                labSize = 4, 
+                pCutoff = 10e-4) + 
+  coord_flip()
+```
+
+### 5.3 Gene clustering
+
+```{r}
+topVarGenes <- head(order(rowVars(assay(vsd)), decreasing = T), 25)
+```
+
+```{r}
+mat <- assay(vsd)[topVarGenes, ]
+mat <- mat - rowMeans(mat)
+anno <- as.data.frame(colData(vsd)[, c("tissue", "donor", "hypermutated")])
+pheatmap(mat, annotation_col = anno)
+```

@@ -1,0 +1,227 @@
+---
+title: "OCCRC_RNAseq_DESeq2"
+output: html_document
+date: "2023-08-09"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r message=FALSE, warning=FALSE}
+# set library path
+.libPaths(c("~/Documents/Rlib", .libPaths()))
+```
+
+```{r load packages, message=FALSE, warning=FALSE}
+library(SummarizedExperiment)
+library(DESeq2)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(stringr)
+library(stats)
+library(pheatmap)
+library("PoiClaClu")
+library("glmpca")
+library("ggbeeswarm")
+library("genefilter")
+library(EnhancedVolcano)
+library(RColorBrewer)
+library(org.Hs.eg.db)
+library(EnsDb.Hsapiens.v86)
+```
+
+## 1. Load and update rds file
+
+```{r}
+se <- readRDS('../data/processed_AB_20230627/salmon.merged.gene_counts.rds')
+```
+
+```{r}
+hypermutated = c(6310, 6413, 6346, 6976, 8210, 8347, 8637)
+non_hypermutated = as.factor(c(6411, 6344, 6794, 4732, 6894))
+tbc_hypermutated = as.factor(c(946, 7713, 7984))
+
+ca_history = as.factor(c(6413, 6346, 6976, 8347, 6344, 6794, 6894))
+```
+
+```{r update samples info}
+colinfo <- data.frame(colData(se))
+colinfo <- colinfo %>% 
+  mutate(tissue = case_when(
+    endsWith(names, "Nor") ~ "Norm",
+    endsWith(names, "Norm") ~ "Norm",
+    endsWith(names, "Pol") ~ "Poly",
+    endsWith(names, "Poly") ~ "Poly")) %>%
+  mutate(donor = str_split_fixed(names, fixed("_"), 3)[,2]) %>%
+  mutate(hypermutated = case_when(
+    donor %in% non_hypermutated ~ "No",
+    donor %in% tbc_hypermutated ~ "TBC",
+    .default = "Yes")) %>%
+  mutate(ca_history = case_when(
+    donor %in% ca_history ~ "Yes",
+    .default = "NA")
+    )
+```
+
+```{r}
+# save condistions as factors
+tissue <- as.factor(se$tissue)
+donor <- as.factor(se$donor)
+```
+
+```{r}
+se$tissue <-colinfo$tissue # add tissue info
+se$donor <- colinfo$donor #add patients info
+se$ca_history <- colinfo$ca_history
+se$hypermutated <- colinfo$hypermutated
+head(colData(se))
+```
+
+```{r}
+sprintf("This RNAseq dataset detected %d genes from %d samples of %d donors", 
+        dim(se)[1],
+        dim(se)[2],
+        nlevels(donor))
+```
+
+As per advice from Andy and the [tutorial here](http://master.bioconductor.org/packages/release/workflows/vignettes/rnaseqGene/inst/doc/rnaseqGene.html), it is recommended to just round the fragment counts generated from Salmon
+
+```{r}
+assay(se, "round_counts") <- round(assay(se,'counts'))
+assay(se, "round_counts")[1:5,1:5]
+```
+
+```{r message=FALSE, warning=FALSE}
+# save as DESeqDataSet object
+dds.raw <- DESeqDataSetFromMatrix(countData = assay(se, 'round_counts'),
+                              colData = colData(se),
+                              design = ~ tissue + hypermutated)
+```
+
+## 2. Data pre-processing
+
+### 2.1 Filter out low expressed genes
+
+```{r}
+# act conservatively - only filter out genes with less than 2 count across all samples
+keep <- rowSums(counts(dds.raw)) > 3
+dds <- dds.raw[keep,]
+nrow(dds)
+```
+
+```{r}
+par(mfrow=c(2,1), mar=c(4,4,2,2))
+
+plot(table(rowSums(counts(dds.raw)==0)),
+     ylab = "Number of genes",
+     main="A. Raw data")
+
+plot(table(rowSums(counts(dds)==0)), 
+     xlab = "Number of samples with unexpressed genes across all samples",
+     ylab = "Number of genes",
+     main="B. Filtered data")
+```
+
+### 2.2 Log transformation
+
+```{r}
+rld <- rlog(dds, blind = T) # so that the difference between different tissue does not contrubute to the expected variance-mean trend
+```
+
+```{r}
+assay(rld)[1:5, 1:5]
+```
+
+```{r}
+# also try the vsd method
+vsd <- vst(dds, blind=F)
+assay(vsd)[1:5,1:5]
+```
+
+Now plot and get a more straighforward overview of the effect of the transformation.
+
+```{r}
+dds <- estimateSizeFactors(dds)
+
+df <- bind_rows(
+  as_tibble(log2(counts(dds, normalized=T)[,1:2]+1)) %>%
+    mutate(transformation = "log2(x+1)"),
+  as_tibble(assay(vsd)[,1:2]) %>% mutate(transformation = "vst"),
+  as_tibble(assay(rld)[,1:2]) %>% mutate(transformation = "rlog")
+)
+
+colnames(df)[1:2] <- c("x", "y")
+lvls <- c("log2(x+1)", "vst", "rlog")
+df$transformation <- factor(df$transformation, levels=lvls)
+
+```
+
+```{r}
+ggplot(df, aes(x=x,y=y)) + geom_hex(bins = 80) + coord_fixed() + facet_grid( . ~ transformation)
+```
+
+### 2.3 Measure sample difference
+
+This is to check which samples are similar to each other
+
+```{r}
+sampleDists2 <- dist(t(assay(vsd)))
+```
+
+```{r}
+sampleDistMatrix2 <- as.matrix(sampleDists2)
+rownames(sampleDistMatrix2) <- paste( vsd$donor, vsd$tissue, sep='-')
+colnames(sampleDistMatrix2) <- NULL
+colors <- colorRampPalette( rev(brewer.pal(9, "Blues")))(255)
+pheatmap(sampleDistMatrix2,
+         clustering_distance_rows = sampleDists2,
+         clustering_distance_cols = sampleDists2,
+         col=colors, 
+         main="Heatmap of sample-to-sample distance with VST")
+```
+
+## 3. Dimension Reduction
+
+### 3.1 PCA
+
+```{r}
+plotPCA(vsd, intgroup = "tissue", ntop=5000) # vsd seems to be a better choice
+# so the top 2 PC only explains 35% total variance
+```
+
+### 3.2 Multidimensional scaling (MDS) plot
+
+We can use this when we do not have raw count matrix, but only a matrix of distances
+
+we can use the vsd transformed data for MDS
+
+```{r}
+mds <- as.data.frame(colData(vsd)) %>%
+  cbind(cmdscale(sampleDistMatrix2))
+ggplot(mds, aes(x = `1`, y = `2`, color = tissue)) + 
+  geom_point(size = 3) + coord_fixed() + ggtitle("MDS with VST data") + theme(legend.position = 'right')
+```
+
+```{r}
+# plot MDS by hypermutation status
+ggplot(mds, aes(x = `1`, y = `2`, color=tissue, shape = hypermutated)) + 
+     geom_point(size = 3) + 
+     scale_fill_discrete(breaks=c('Yes', 'No', 'TBC')) +
+     scale_shape_manual(values = c(4, 1, 19)) +
+     coord_fixed() + 
+     ggtitle("MDS with VST data") + 
+     theme(legend.position = 'bottom')
+```
+## 4. DE analysis
+
+```{r}
+# run the DE analysis with a single call <- 
+dds <- DESeq(dds)
+```
+
+```{r}
+saveRDS(dds, file = "dds_DEseq.RDS")
+```
+

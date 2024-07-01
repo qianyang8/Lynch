@@ -1,0 +1,11 @@
+o	salmon.merged.gene_counts.tsv: Matrix of gene-level raw counts across all samples.
+o	salmon.merged.gene_tpm.tsv: Matrix of gene-level TPM values across all samples.
+o	salmon.merged.gene_counts.rds: RDS object that can be loaded in R that contains a SummarizedExperiment container with the TPM (abundance), estimated counts (counts) and transcript length (length) in the assays slot for genes.
+o	salmon.merged.gene_counts_scaled.tsv: Matrix of gene-level library size-scaled counts across all samples.
+o	salmon.merged.gene_counts_scaled.rds: RDS object that can be loaded in R that contains a SummarizedExperiment container with the TPM (abundance), estimated library size-scaled counts (counts) and transcript length (length) in the assays slot for genes.
+o	salmon.merged.gene_counts_length_scaled.tsv: Matrix of gene-level length-scaled counts across all samples.
+o	salmon.merged.gene_counts_length_scaled.rds: RDS object that can be loaded in R that contains a SummarizedExperiment container with the TPM (abundance), estimated length-scaled counts (counts) and transcript length (length) in the assays slot for genes.
+o	salmon.merged.transcript_counts.tsv: Matrix of isoform-level raw counts across all samples.
+o	salmon.merged.transcript_tpm.tsv: Matrix of isoform-level TPM values across all samples.
+o	salmon.merged.transcript_counts.rds: RDS object that can be loaded in R that contains a SummarizedExperiment container with the TPM (abundance), estimated isoform-level raw counts (counts) and transcript length (length) in the assays slot for transcripts.
+o	salmon_tx2gene.tsv: Tab-delimited file containing gene to transcripts ids mappings.

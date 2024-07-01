@@ -1,0 +1,151 @@
+---
+title: "Nick's lncRNA in Lynch RNAseq"
+author: "Qian Yang"
+format: pdf
+editor: visual
+engine: knitr
+date: 2024-04-23
+last-modified: today
+---
+
+## Background
+
+To check the expression of lncRNAs identified by Nick's team in our Lynch cohort.
+
+Details of the transcripts is shared by Nick's team (Dr Wojciech Barczak) in the email on 31st March 2024.
+
+1.  **ENST00000400362.2**  BX322557.10 (now LINC00205-201)
+
+2.  ENST00000685281.1    AC079135.1 (now GBX2-AS1)
+
+3.  **ENST00000562866.1**     VPS9D1-AS1
+
+4.  **ENST00000529369.1**   RP11-660L16.2 (now DHCR7-DT)
+
+5.  **ENST00000585075.1**   RP11-649A18.12 (now MIF4GD-DT )
+
+6.  **ENST00000544868.1** **ENST00000534336.1**   MALAT1
+
+7.  **ENST00000430633.1**, **ENST00000550853.1**      LINC00094 (now BRD3OS but non-protein transcript)
+
+```{bash}
+#| include: false
+# extract the transcripts from salmon tpm
+grep "tx\|ENST00000400362\|ENST00000685281\|ENST00000562866\|ENST00000529369\|ENST00000585075\|ENST00000544868\|ENST00000534336\|ENST00000430633\|ENST00000550853" ./RNAseq_Processed_20230627/salmon.merged.transcript_tpm.tsv > ./RNAseq_Processed_20230627/Nick_lncRNA_LynchRNAseq.tsv
+```
+
+```{r load libs}
+#| warning: false
+library(dplyr)
+library(tidyverse)
+```
+
+```{r read_tsv}
+#| include: false
+lncRNA <- read.delim("./RNAseq_Processed_20230627/Nick_lncRNA_LynchRNAseq.tsv", header = T)
+```
+
+```{r update annotation}
+#| echo: false
+lncRNA_anno <- lncRNA %>% pivot_longer(
+  cols = colnames(lncRNA)[3:44],
+                        names_to = "Sample",
+                        values_to = "TPM"
+  ) %>% 
+  select(-gene_id) %>% 
+  mutate(Tissue = 
+           case_when(
+             str_detect(Sample, "Pol") ~ "Lynch Polyp",
+             str_detect(Sample, "Nor") ~ "Lynch Normal"
+           )
+         ) %>%
+  mutate(Patient = as.factor(str_extract(Sample, "\\d{3,4}")))
+head(lncRNA_anno)
+```
+
+In our cohort, we have 16 Lynch patients, polyps and paired neighboring normal tissues were collected and sent for RNA sequencing.
+
+```{r}
+#| echo: false
+table(lncRNA_anno$tx)
+```
+
+in our data, Transcript ENST00000685281.1 is **NOT** found, the other 8 has been detected in all tissues.
+
+Now take a look at the level of expression (in TPM) in **Normal vs Polyps tissues** from Lynch patients.
+
+```{r}
+lncRNA_anno %>% ggplot(aes(x = tx, y = TPM, colour = Tissue)) + geom_boxplot() + xlab("Transcripts") + ggtitle("Expression in Lynch bulk RNAseq")
+```
+
+You have two transcripts expressed in the RNAseq, although their expression levels do not seem to differ significantly between polyps and normal tissues.
+
+## Expression level in normal tissues
+
+get the sample numbers for RNAseq
+
+```{r}
+sample.df <- read.delim("GTEx_Analysis_v8_Annotations_SampleAttributesDS.txt", as.is=TRUE, header=TRUE, row.names=1)
+```
+
+```{r}
+table(sample.df$SMAFRZE)
+```
+
+```{r}
+rnaseq.sample.df <- sample.df[sample.df['SMAFRZE']=='RNASEQ', ]
+```
+
+```{r}
+as.matrix(sort(table(rnaseq.sample.df['SMTSD']), decreasing=TRUE))
+```
+
+```{r}
+head(rnaseq.sample.df)
+```
+
+subset just for colon
+
+```{r}
+colon.rnaseq.sample.df <- rnaseq.sample.df %>% 
+  filter(str_detect(SMTSD, "Colon")) %>% 
+  filter(SMRIN > 7) %>%
+  select(SMRIN, SMTS, SMTSD) %>%
+  mutate(SMTSD = str_extract(SMTSD, "-\\s(.*)", 1))
+dim(colon.rnaseq.sample.df)
+```
+
+```{r}
+head(rownames(colon.rnaseq.sample.df))
+```
+
+extract the ENST from GTEx .gct file - this will take some time
+
+```{bash}
+#awk -F"\t" '$1 ~ /ENST00000400362|ENST00000685281|ENST00000562866|ENST00000529369|ENST00000585075|ENST00000544868|ENST00000534336|ENST00000430633|ENST00000550853/ {print}' ~/Downloads/GTEx_Analysis_2017-06-05_v8_RSEMv1.3.0_transcript_tpm.gct > Nick_lncRNA_GTExV8.tsv
+```
+
+```{r}
+tpm.df <- read.delim("test_all.tsv", header = T, row.names = 1)
+colnames(tpm.df) <- gsub("\\.","-",colnames(tpm.df))
+colon.sample.tpm.df <- tpm.df %>% 
+  select(all_of(rownames(colon.rnaseq.sample.df))) %>% 
+  rownames_to_column("tx") %>% 
+  pivot_longer(starts_with("GTEX"), names_to = "Sample", values_to = "TPM") %>%
+  mutate(Tissue = "GTEx colon") %>%
+  mutate(tx = gsub("\\.\\d+", "", tx))
+```
+
+merge two databases
+
+```{r}
+lncRNA_merge <- lncRNA_anno[,1:4] %>% bind_rows(colon.sample.tpm.df)
+```
+
+```{r}
+lncRNA_merge %>% ggplot(aes(x = tx, y = TPM, colour = Tissue)) + geom_boxplot() + coord_flip() + xlab("Transcripts") + ggtitle("Expression in GTEx vs Lynch")
+```
+
+```{r}
+sessionInfo()
+```

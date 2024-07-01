@@ -1,0 +1,435 @@
+---
+title: "Lynch_RNAseq_transcript_DE"
+author: "Qian Yang"
+date: "2023-08-21"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r message=FALSE, warning=FALSE}
+# set library path
+.libPaths(c("~/Documents/Rlib", .libPaths()))
+```
+
+```{r load packages, message=FALSE, warning=FALSE}
+library(SummarizedExperiment)
+library(DESeq2)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(stringr)
+library(stats)
+library(pheatmap)
+library("PoiClaClu")
+library("glmpca")
+library("ggbeeswarm")
+library(apeglm)
+library("genefilter")
+library(EnhancedVolcano)
+library(RColorBrewer)
+library(org.Hs.eg.db)
+library(EnsDb.Hsapiens.v86)
+```
+
+## 1. Load data and add metadata information
+
+```{r}
+se_trans <- readRDS("./data/processed_AB_20230627/salmon.merged.transcript_counts.rds")
+```
+
+```{r}
+head(se_trans)
+```
+
+```{r}
+head(colData(se_trans))
+```
+
+```{r}
+head(rownames(se_trans))
+```
+
+now add more metadata information to the se_trans object
+
+```{r}
+hypermutated = c(6310, 6413, 6346, 6976, 8210, 8347, 8637)
+non_hypermutated = as.factor(c(6411, 6344, 6794, 4732, 6894))
+tbc_hypermutated = as.factor(c(946, 7713, 7984))
+ca_history = as.factor(c(6413, 6346, 6976, 8347, 6344, 6794, 6894))
+
+colinfo_trans <- data.frame(colData(se_trans))
+colinfo_trans <- colinfo_trans %>% 
+  mutate(tissue = case_when(
+    endsWith(names, "Nor") ~ "Norm",
+    endsWith(names, "Norm") ~ "Norm",
+    endsWith(names, "Pol") ~ "Poly",
+    endsWith(names, "Poly") ~ "Poly")) %>%
+  mutate(donor = str_split_fixed(names, fixed("_"), 3)[,2]) %>%
+  mutate(hypermutated = case_when(
+    donor %in% non_hypermutated ~ "No",
+    donor %in% tbc_hypermutated ~ "TBC",
+    .default = "Yes")) %>%
+  mutate(ca_history = case_when(
+    donor %in% ca_history ~ "Yes",
+    .default = "NA")
+    )
+```
+
+```{r}
+se_trans$tissue <-colinfo_trans$tissue # add tissue info
+se_trans$donor <- colinfo_trans$donor #add patients info
+se_trans$ca_history <- colinfo_trans$ca_history
+se_trans$hypermutated <- colinfo_trans$hypermutated
+head(colData(se_trans))
+```
+
+```{r}
+head(assay(se_trans))
+```
+
+since the counts are not integer, round them to the nearest integer and proceed.
+
+```{r}
+assay(se_trans, "round_counts") <- round(assay(se_trans,'counts'))
+head(assay(se_trans, "round_counts"))
+```
+
+```{r message=FALSE, warning=FALSE}
+# save as DESeqDataSet object
+dds_trans.raw <- DESeqDataSetFromMatrix(countData = assay(se_trans, 'round_counts'),
+                              colData = colData(se_trans),
+                              design = ~ tissue)
+```
+
+The raw dataset has 196354 transcripts.
+
+## 2. Data pre-processing
+
+### 2.1 Filter out low expressed transcripts
+
+```{r}
+dds_trans <- dds_trans.raw[rowSums(counts(dds_trans.raw)) > 3] # only keep transcripts detected in more than 3 samples
+dds_trans
+```
+
+The filtered dataset has 141782 transcripts expressed in more than 3 samples.
+
+### 2.2 Normalization
+
+```{r}
+# use vsd for transformation
+vsd_trans <- vst(dds_trans, blind=F)
+assay(vsd_trans)[1:5,1:5]
+```
+
+### 2.3 Measure sample distance
+
+```{r}
+sampleDists_trans <- dist(t(assay(vsd_trans)))
+```
+
+```{r}
+sampleDistMatrix_trans <- as.matrix(sampleDists_trans)
+rownames(sampleDistMatrix_trans) <- paste( vsd_trans$donor, vsd_trans$tissue, sep='-')
+colnames(sampleDistMatrix_trans) <- NULL
+colors <- colorRampPalette( rev(brewer.pal(9, "Blues")))(255)
+pheatmap(sampleDistMatrix_trans,
+         clustering_distance_rows = sampleDists_trans,
+         clustering_distance_cols = sampleDists_trans,
+         col=colors, 
+         main="Heatmap of sample-to-sample distance with VST")
+```
+
+```{r}
+# check with PoiClaClu
+poisd_trans <- PoissonDistance(t(counts(dds_trans)))
+samplePoisDistMatrix_trans <- as.matrix(poisd_trans$dd)
+rownames(samplePoisDistMatrix_trans) <- paste( dds_trans$donor, dds_trans$tissue, sep=" - " )
+colnames(samplePoisDistMatrix_trans) <- NULL
+pheatmap(samplePoisDistMatrix_trans,
+         clustering_distance_rows = poisd_trans$dd,
+         clustering_distance_cols = poisd_trans$dd,
+         col = colors)
+```
+
+## 3. Dimension reduction
+
+### 3.1 PCA plot
+
+```{r}
+plotPCA(vsd_trans, intgroup = "tissue", ntop=5000)
+```
+
+### 3.2 MDS plot
+
+```{r}
+mds_trans <- as.data.frame(colData(vsd_trans)) %>%
+  cbind(cmdscale(sampleDistMatrix_trans))
+ggplot(mds_trans, aes(x = `1`, y = `2`, color = tissue)) + 
+  geom_point(size = 3) + coord_fixed() + ggtitle("MDS with VST data") + theme(legend.position = 'right')
+```
+
+```{r}
+mdsPois_trans <- as.data.frame(colData(dds_trans)) %>%
+   cbind(cmdscale(samplePoisDistMatrix_trans))
+
+ggplot(mdsPois_trans, aes(x = `1`, y = `2`, color = tissue)) +
+  geom_point(size = 3) + coord_fixed() + ggtitle("MDS with PoissonDistances")
+```
+
+```{r}
+# plot MDS by hypermutation status
+ggplot(mds_trans, aes(x = `1`, y = `2`, color=tissue, shape = hypermutated)) + 
+     geom_point(size = 3) + 
+     scale_fill_discrete(breaks=c('Yes', 'No', 'TBC')) +
+     scale_shape_manual(values = c(4, 1, 19)) +
+     coord_fixed() + 
+     ggtitle("MDS with VST data") + 
+     scale_colour_discrete(name="Tissue") +
+     theme(legend.position = 'bottom')
+```
+
+## 4. DE analysis
+
+```{r}
+dds_trans <- DESeq(dds_trans)
+```
+
+```{r}
+res_trans <- results(dds_trans)
+head(res_trans)
+```
+
+```{r}
+summary(res_trans)
+```
+
+```{r}
+res_trans[order(res_trans$log2FoldChange),]
+```
+
+## 5. Visualizing results
+
+Visualize the transcript that is most signigicantly differentially expressed in poly vs normal tissue
+
+```{r}
+plotCounts(dds_trans, gene = rownames(res_trans)[which.min(res_trans$padj)], intgroup=c("tissue"))
+```
+
+### 5.1 Observe the top 20 DE transcript
+
+```{r}
+res_trans_df <- data.frame(res_trans)
+sig_res_trans <- dplyr::filter(res_trans_df, padj < 0.01 & abs(log2FoldChange) > 1)
+top20_sig_genes_trans <- sig_res_trans %>% arrange(padj) %>% head(20) %>% rownames()
+top20_sig_norm_trans <- data.frame(assay(vsd_trans)[top20_sig_genes_trans,]) %>% tibble::rownames_to_column(var = "ENST") %>% as_tibble()
+
+gather_top20_sig_trans <- top20_sig_norm_trans %>% gather(colnames(top20_sig_norm_trans)[2:43], key="sample", value="vst_counts")
+```
+
+```{r}
+gather_top20_sig_trans <- gather_top20_sig_trans %>% 
+  mutate(tissue = case_when(
+    endsWith(sample, "Nor") ~ "Norm",
+    endsWith(sample, "Norm") ~ "Norm",
+    endsWith(sample, "Pol") ~ "Poly",
+    endsWith(sample, "Poly") ~ "Poly")) %>%
+  mutate(donor = str_split_fixed(sample, fixed("_"), 3)[,2]) %>%
+  mutate(hypermutated = case_when(
+    donor %in% non_hypermutated ~ "No",
+    donor %in% tbc_hypermutated ~ "TBC",
+    .default = "Yes")) %>%
+  mutate(ca_history = case_when(
+    donor %in% ca_history ~ "Yes",
+    .default = "NA")) 
+head(gather_top20_sig_trans)
+```
+
+Add annotation to the transcripts name
+
+```{r}
+edb <- EnsDb.Hsapiens.v86
+columns(edb)
+```
+
+```{r}
+listTxbiotypes(edb)
+```
+
+```{r}
+trans_anno <- genes(edb, 
+                    filter = TxIdFilter(rownames(res_trans_df)), 
+                    columns = c("gene_id", "tx_biotype", "symbol"), 
+                    return.type = "DataFrame")
+head(trans_anno)
+dim(trans_anno)
+```
+
+```{r}
+gather_top20_sig_trans_anno <- as.data.frame(merge(gather_top20_sig_trans, 
+                                     trans_anno, 
+                                     by.x= "ENST",
+                                     by.y = "tx_id",
+                                     all=F))
+dim(gather_top20_sig_trans_anno)
+colnames(gather_top20_sig_trans_anno)
+```
+
+```{r message=FALSE, warning=FALSE}
+sapply(gather_top20_sig_trans_anno, function(x) sum(is.na(x)))
+```
+
+plot the top 20 DE transcripts
+
+```{r}
+ggplot(gather_top20_sig_trans_anno) + 
+  geom_point(aes(x=symbol, y = vst_counts, color = factor(tissue, level=c("Poly", "Norm")))) +
+  scale_y_log10() +
+  xlab("Genes") +
+  ylab("Log10 Normalized Counts") +
+  scale_colour_discrete(name="Tissue") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+```{r}
+ggplot(gather_top20_sig_trans_anno, 
+       aes(x=symbol, y = vst_counts, color=factor(tissue, level=c("Poly", "Norm")))) +
+  scale_y_log10() +
+  xlab("Top 20 differentially expressed genes") +
+  ylab("Log10 Normalized Counts") +
+  geom_boxplot(outlier.shape=NA) +
+  geom_point(position=position_jitterdodge(), size=0.9, alpha=0.5) +
+  scale_color_discrete(name="Tissue") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) 
+```
+
+```{r}
+ggplot(gather_top20_sig_trans_anno,
+       aes(x=symbol, y = vst_counts, color = factor(tissue, level=c("Poly", "Norm")))) +
+  scale_y_log10() +
+  geom_boxplot()+
+  geom_point(position=position_jitterdodge(), size=1, alpha=0.7) +
+  facet_wrap(~symbol, scale="free", ncol = 4) +
+  scale_color_discrete(name="Tissue") +
+  ylab("Log10 normalized counts")
+```
+
+```{r}
+ggplot(gather_top20_sig_trans_anno, aes(x=symbol, y = vst_counts, color = factor(ca_history, level=c("Yes", "NA")))) +
+  scale_y_log10() +
+  xlab("Top 20 differentially expressed genes") +
+  ylab("Log10 Normalized Counts") +
+  geom_beeswarm(size=0.7, dodge.width = 0.3) +
+  scale_y_log10() +
+  ylim(6,11) +
+  scale_colour_discrete(name="Cancer History?") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+```{r}
+ggplot(gather_top20_sig_trans_anno, aes(x=symbol, y = vst_counts, color = factor(hypermutated, level=c("Yes", "TBC", "No")))) +
+  scale_y_log10() +
+  xlab("Top 20 differentially expressed genes") +
+  ylab("Log10 Normalized Counts") +
+  geom_beeswarm(size=0.7, dodge.width = 0.3) +
+  scale_y_log10() +
+  ylim(6,11) +
+  scale_colour_discrete(name="Hypermutation") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+### 5.2 MA plot
+
+```{r}
+res_MA_trans <- lfcShrink(dds_trans, coef="tissue_Poly_vs_Norm", type="apeglm")
+plotMA(res_MA_trans, ylim=c(-5,6))
+```
+
+### 5.3 Volcano plot
+
+```{r}
+res_trans_annots <- AnnotationDbi::select(edb,
+                           keys=rownames(res_trans),
+                           keytype="TXID",
+                           columns=c("SYMBOL", "GENEID"))
+dim(res_trans_annots)
+```
+
+```{r}
+res_trans_df_annot <- merge(res_trans_df, res_trans_annots, by.x=0, by.y="TXID")
+res_trans_df_annot
+```
+
+```{r}
+EnhancedVolcano(res_trans_df_annot, 
+                lab = res_trans_df_annot$SYMBOL, 
+                x = "log2FoldChange", 
+                y = "pvalue",
+                pCutoff = 10e-3,
+                FCcutoff = 20,
+                drawConnectors = TRUE,
+                pointSize = 2.0,
+                labSize = 3.0)
+```
+
+```{r}
+res_trans_annots_FC20 <- dplyr::filter(res_trans_df_annot, abs(log2FoldChange) > 20)
+res_trans_annots_FC20[order(res_trans_annots_FC20$log2FoldChange),]
+```
+
+```{r}
+ggplot(res_trans_annots_FC20,
+       aes(x=log2FoldChange, y=-log10(pvalue), label = SYMBOL)) +
+  geom_point()+
+  geom_text_repel(size=3)
+```
+
+### 6. Check Nick's lncRNA
+
+```{r}
+Nick_lncRNA <- c("ENST00000400362", "ENST00000685281", "ENST00000562866", "ENST00000529369", "ENST00000585075", "ENST00000544868", "ENST00000534336", "ENST00000430633", "ENST00000550853")
+```
+
+```{r}
+# transform
+lncRNA_norm <- data.frame(assay(vsd_trans))[rownames(vsd_trans) %in% Nick_lncRNA, ] %>% tibble::rownames_to_column("transcript") %>% as_tibble()
+# update the names
+gather_lncRNA <- lncRNA_norm %>% 
+  gather(colnames(lncRNA_norm)[2:43], key="sample", value="vst_counts")
+
+# update data info
+gather_lncRNA <- gather_lncRNA %>% mutate(tissue = case_when(
+     endsWith(sample, "Nor") ~ "Normal",
+     endsWith(sample, "Norm") ~ "Normal",
+     endsWith(sample, "Pol") ~ "Polyps",
+     endsWith(sample, "Poly") ~ "Polyps")) %>% 
+  mutate(donor = str_split_fixed(sample, fixed("_"), 3)[,2]) %>%
+  mutate("hypermutated" = case_when(
+  donor %in% hypermutated ~ "Yes",
+  donor %in% non_hypermutated ~ "No",
+  donor %in% tbc_hypermutated ~ "TBC"))
+
+ggplot(gather_lncRNA, aes(x=transcript, y = vst_counts, fill = tissue)) + 
+  geom_boxplot() +
+  geom_dotplot(binaxis='y', stackdir='center', dotsize = 0.5, position=position_dodge(0.75), alpha = 0.5) + coord_flip() +
+  scale_y_log10() +
+  xlab("Genes") +
+  ylab("Log10 Normalized Counts") 
+```
+
+```{r}
+ggplot(gather_lncRNA, aes(x=tissue, y = vst_counts, fill = tissue)) + 
+  geom_boxplot(aes(fill = tissue)) +
+  geom_line(aes(group = donor), linewidth = .2) +
+  geom_point(size = 1) +
+  facet_wrap(~ transcript, nrow = 1) +
+  theme(strip.text.x = element_text(size = 10)) +
+  scale_y_log10() +
+  xlab("Shortlisted lncRNA from Nick's group") +
+  ylab("Log10 Normalized Counts")
+
+ggsave("figures/Nick_lncRNA_Lynch_normalised.png", dpi = 600, device = "png", width = 55, height = 20, units = "cm", scale = 0.6)
+```
