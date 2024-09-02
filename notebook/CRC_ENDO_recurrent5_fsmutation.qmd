@@ -1,0 +1,28 @@
+---
+title: "CRC and ENDO recurrent 5 frameshift mutation intersect"
+author: "Qian"
+format: html
+editor: visual
+---
+
+```{r}
+library(dplyr)
+library(here)
+```
+
+```{r}
+files <- list.files(here("data"), "recurrent_5", full.names = T, recursive = T)
+```
+
+
+```{r}
+recur <- lapply(files, read.delim, sep = "\t")
+crc <- recur[[1]] %>% mutate(source = "CRC") %>% distinct()
+endo <- recur[[2]] %>% mutate(source = "ENDO") %>% distinct()
+intersect <- inner_join(recur[[1]], recur[[2]], by = join_by(gene, transcript, mutation, label), unmatched = "drop", suffix = c(".crc", ".endo"))
+```
+
+```{r}
+head(intersect)
+```
+
